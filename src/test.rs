@@ -16,11 +16,11 @@ fn test_atomic_slice_u8() {
 
     let mut data = Vec::<u8>::new();
     data.resize(length, 0);
-    let atomic_slice = AtomicSlice::new(data);
+    let atomic_slice = Arc::new(AtomicSlice::new(data));
 
     let readers: Vec<std::thread::JoinHandle<()>> = (0..num_readers)
         .map(|i_reader| {
-            let atomic_slice = atomic_slice.clone();
+            let atomic_slice = Arc::clone(&atomic_slice);
             std::thread::spawn(move || {
                 for iter in 0..num_iterations {
                     // Read the slice and assert that its length is as expected and that all values are the same
@@ -42,7 +42,7 @@ fn test_atomic_slice_u8() {
 
     let writers: Vec<std::thread::JoinHandle<()>> = (0..num_writers)
         .map(|_| {
-            let atomic_slice = atomic_slice.clone();
+            let atomic_slice = Arc::clone(&atomic_slice);
             let next_value_to_write = Arc::clone(&next_value_to_write);
             std::thread::spawn(move || {
                 let mut data = Vec::<u8>::new();

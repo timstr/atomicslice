@@ -4,10 +4,7 @@ mod test;
 use std::{
     cell::UnsafeCell,
     ops::{BitXor, Deref},
-    sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 const CURRENT_SLICE_MASK: usize = 0x1;
@@ -67,15 +64,11 @@ fn valid_status(status: usize) -> bool {
     leftover_bits == 0
 }
 
-struct SharedData<T> {
+pub struct AtomicSlice<T> {
     data: UnsafeCell<Vec<T>>,
     stride: usize,
     status: AtomicUsize,
     currently_writing: AtomicBool,
-}
-
-pub struct AtomicSlice<T> {
-    shared_data: Arc<SharedData<T>>,
 }
 
 pub struct AtomicSliceReadGuard<'a, T> {
@@ -89,23 +82,17 @@ impl<T: Default + Clone> AtomicSlice<T> {
         let stride = data.len();
         let pool_size = NUM_SLICES;
         data.resize(stride * pool_size, T::default());
-        let shared_data = SharedData {
+        AtomicSlice {
             data: UnsafeCell::new(data),
             stride,
             status: AtomicUsize::new(0),
             currently_writing: AtomicBool::new(false),
-        };
-        AtomicSlice {
-            shared_data: Arc::new(shared_data),
         }
     }
 
     pub fn read<'a>(&'a self) -> AtomicSliceReadGuard<'a, T> {
         // Get current slice index while also marking all slices as in use.
-        let status = self
-            .shared_data
-            .status
-            .fetch_add(INC_ALL_SLICES, Ordering::SeqCst);
+        let status = self.status.fetch_add(INC_ALL_SLICES, Ordering::SeqCst);
 
         debug_assert!(valid_status(status));
         debug_assert!(slice_1_use_count(status) < 0xFFFF);
@@ -113,52 +100,40 @@ impl<T: Default + Clone> AtomicSlice<T> {
 
         let current_slice = current_slice(status);
 
-        debug_assert!(
-            slice_use_count(
-                current_slice,
-                self.shared_data.status.load(Ordering::SeqCst)
-            ) > 0
-        );
+        debug_assert!(slice_use_count(current_slice, self.status.load(Ordering::SeqCst)) > 0);
 
         // Now that the current slice is known, mark the others as no longer in use
         let status = self
-            .shared_data
             .status
             .fetch_sub(inc_all_slices_except(current_slice), Ordering::SeqCst);
         debug_assert!(valid_status(status));
 
-        let stride = self.shared_data.stride;
+        let stride = self.stride;
         let offset = current_slice * stride;
         let slice: &[T] = unsafe {
-            let ptr_vec = self.shared_data.data.get();
+            let ptr_vec = self.data.get();
             let ptr_data = (*ptr_vec).as_ptr();
             let ptr_begin = ptr_data.add(offset);
             std::slice::from_raw_parts(ptr_begin, stride)
         };
 
-        debug_assert!(
-            slice_use_count(
-                current_slice,
-                self.shared_data.status.load(Ordering::SeqCst)
-            ) > 0
-        );
+        debug_assert!(slice_use_count(current_slice, self.status.load(Ordering::SeqCst)) > 0);
 
         AtomicSliceReadGuard {
             slice,
             current_slice: current_slice,
-            status: &self.shared_data.status,
+            status: &self.status,
         }
     }
 
     pub fn write(&self, data: &[T]) {
-        let stride = self.shared_data.stride;
+        let stride = self.stride;
         if data.len() != stride {
             panic!("Attempted to write slice of the wrong length to AtomicSlice");
         }
 
         // Wait for exclusive access to the write portion
         while !self
-            .shared_data
             .currently_writing
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
@@ -167,7 +142,7 @@ impl<T: Default + Clone> AtomicSlice<T> {
         }
 
         // Load the current status
-        let status = self.shared_data.status.load(Ordering::SeqCst);
+        let status = self.status.load(Ordering::SeqCst);
         debug_assert!(valid_status(status));
         let i = current_slice(status);
         debug_assert!(i < NUM_SLICES);
@@ -175,7 +150,7 @@ impl<T: Default + Clone> AtomicSlice<T> {
 
         // Wait to ensure the next slice is not being used
         loop {
-            let status = self.shared_data.status.load(Ordering::SeqCst);
+            let status = self.status.load(Ordering::SeqCst);
             debug_assert!(valid_status(status));
             if slice_use_count(next_i, status) == 0 {
                 break;
@@ -186,7 +161,7 @@ impl<T: Default + Clone> AtomicSlice<T> {
         // Copy data to the next slice
         let offset = next_i * stride;
         let slice: &mut [T] = unsafe {
-            let ptr_vec = self.shared_data.data.get();
+            let ptr_vec = self.data.get();
             let ptr_data = (*ptr_vec).as_mut_ptr();
             let ptr_begin = ptr_data.add(offset);
             std::slice::from_raw_parts_mut(ptr_begin, stride)
@@ -196,25 +171,13 @@ impl<T: Default + Clone> AtomicSlice<T> {
         }
 
         // Point all new readers to the next slice
-        let status = self
-            .shared_data
-            .status
-            .fetch_xor(i.bitxor(next_i), Ordering::SeqCst);
+        let status = self.status.fetch_xor(i.bitxor(next_i), Ordering::SeqCst);
         debug_assert!(valid_status(status));
 
         // Release exclusive access to the write portion
-        self.shared_data
-            .currently_writing
+        self.currently_writing
             .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
             .unwrap();
-    }
-}
-
-impl<T> Clone for AtomicSlice<T> {
-    fn clone(&self) -> Self {
-        Self {
-            shared_data: Arc::clone(&self.shared_data),
-        }
     }
 }
 

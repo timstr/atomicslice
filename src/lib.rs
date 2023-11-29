@@ -65,7 +65,7 @@ fn valid_status(status: usize) -> bool {
 }
 
 pub struct AtomicSlice<T> {
-    data: UnsafeCell<Vec<T>>,
+    data: UnsafeCell<Box<[T]>>,
     stride: usize,
     status: AtomicUsize,
     currently_writing: AtomicBool,
@@ -83,7 +83,7 @@ impl<T: Default + Clone> AtomicSlice<T> {
         let pool_size = NUM_SLICES;
         data.resize(stride * pool_size, T::default());
         AtomicSlice {
-            data: UnsafeCell::new(data),
+            data: UnsafeCell::new(data.into_boxed_slice()),
             stride,
             status: AtomicUsize::new(0),
             currently_writing: AtomicBool::new(false),
@@ -111,8 +111,8 @@ impl<T: Default + Clone> AtomicSlice<T> {
         let stride = self.stride;
         let offset = current_slice * stride;
         let slice: &[T] = unsafe {
-            let ptr_vec = self.data.get();
-            let ptr_data = (*ptr_vec).as_ptr();
+            let ptr_box = self.data.get();
+            let ptr_data = (*ptr_box).as_ptr();
             let ptr_begin = ptr_data.add(offset);
             std::slice::from_raw_parts(ptr_begin, stride)
         };
@@ -161,8 +161,8 @@ impl<T: Default + Clone> AtomicSlice<T> {
         // Copy data to the next slice
         let offset = next_i * stride;
         let slice: &mut [T] = unsafe {
-            let ptr_vec = self.data.get();
-            let ptr_data = (*ptr_vec).as_mut_ptr();
+            let ptr_box = self.data.get();
+            let ptr_data = (*ptr_box).as_mut_ptr();
             let ptr_begin = ptr_data.add(offset);
             std::slice::from_raw_parts_mut(ptr_begin, stride)
         };

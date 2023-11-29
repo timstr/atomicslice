@@ -20,12 +20,16 @@ use std::{
 // use count. More slices could be accommodated by trading off the
 // maximum number of simultaneous reads and the amount of padding.
 
-const SLICE_1_INC: u64 = 0x00_0000_00_0001_00_00;
-const SLICE_2_INC: u64 = 0x00_0001_00_0000_00_00;
+pub mod constants {
+    pub const CURRENT_SLICE_MASK: u64 = 0x1;
 
-const VALID_STATUS_MASK: u64 = 0x00_FFFF_00_FFFF_00_01;
+    pub const SLICE_1_INC: u64 = 0x00_0000_00_0001_00_00;
+    pub const SLICE_2_INC: u64 = 0x00_0001_00_0000_00_00;
 
-const INC_ALL_SLICES: u64 = SLICE_1_INC | SLICE_2_INC;
+    pub const VALID_STATUS_MASK: u64 = 0x00_FFFF_00_FFFF_00_01;
+
+    pub const INC_ALL_SLICES: u64 = SLICE_1_INC | SLICE_2_INC;
+}
 
 fn slice_1_use_count(status: u64) -> u16 {
     ((status >> 16) & 0xFFFF) as u16
@@ -44,7 +48,7 @@ fn slice_use_count(slice: u8, status: u64) -> u16 {
 }
 
 fn valid_status(status: u64) -> bool {
-    (status & !VALID_STATUS_MASK) == 0
+    (status & !constants::VALID_STATUS_MASK) == 0
 }
 
 pub struct AtomicSlice<T> {
@@ -78,21 +82,23 @@ impl<T: Default + Clone> AtomicSlice<T> {
 
     pub fn read<'a>(&'a self) -> AtomicSliceReadGuard<'a, T> {
         // Get current slice index while also marking all slices as in use.
-        let status = self.status.fetch_add(INC_ALL_SLICES, Ordering::SeqCst);
+        let status = self
+            .status
+            .fetch_add(constants::INC_ALL_SLICES, Ordering::SeqCst);
 
         debug_assert!(valid_status(status));
         debug_assert!(slice_1_use_count(status) < 0xFFFF);
         debug_assert!(slice_2_use_count(status) < 0xFFFF);
 
-        let current_slice = (status & 1) as u8;
+        let current_slice = (status & constants::CURRENT_SLICE_MASK) as u8;
 
         debug_assert!(slice_use_count(current_slice, self.status.load(Ordering::SeqCst)) > 0);
 
         // Now that the current slice is known, mark the others as no longer in use
         let inc_other_slice = if current_slice == 0 {
-            SLICE_2_INC
+            constants::SLICE_2_INC
         } else {
-            SLICE_1_INC
+            constants::SLICE_1_INC
         };
         let status = self.status.fetch_sub(inc_other_slice, Ordering::SeqCst);
         debug_assert!(valid_status(status));
@@ -133,7 +139,7 @@ impl<T: Default + Clone> AtomicSlice<T> {
         // Load the current status
         let status = self.status.load(Ordering::SeqCst);
         debug_assert!(valid_status(status));
-        let i = (status & 1) as u8;
+        let i = (status & constants::CURRENT_SLICE_MASK) as u8;
         let next_i = i ^ 1;
 
         // Wait to ensure the next slice is not being used
@@ -194,9 +200,9 @@ impl<'a, T> Deref for AtomicSliceReadGuard<'a, T> {
 impl<'a, T> Drop for AtomicSliceReadGuard<'a, T> {
     fn drop(&mut self) {
         let inc_slice = if self.current_slice == 0 {
-            SLICE_1_INC
+            constants::SLICE_1_INC
         } else {
-            SLICE_2_INC
+            constants::SLICE_2_INC
         };
         let status = self.status.fetch_sub(inc_slice, Ordering::SeqCst);
         debug_assert!(valid_status(status));

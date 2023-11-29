@@ -10,11 +10,11 @@ use std::{
 // Status 64-bit layout
 // Byte 0 : active slice index
 // Byte 1 : unused padding
-// Byte 2 : slice 0 use count, low byte
-// Byte 3 : slice 0 use count, high byte
+// Byte 2 : slice 1 use count, low byte
+// Byte 3 : slice 1 use count, high byte
 // Byte 4 : unused padding
-// Byte 5 : slice 1 use count, low byte
-// Byte 6 : slice 1 use count, high byte
+// Byte 5 : slice 2 use count, low byte
+// Byte 6 : slice 2 use count, high byte
 // Byte 7 : unused padding
 // This provides 1 byte for active slice, and 2 bytes for each slice's
 // use count. More slices could be accommodated by trading off the
@@ -70,6 +70,10 @@ impl<T: Default + Clone> AtomicSlice<T> {
             status: AtomicU64::new(0),
             currently_writing: AtomicBool::new(false),
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.stride
     }
 
     pub fn read<'a>(&'a self) -> AtomicSliceReadGuard<'a, T> {
@@ -162,6 +166,17 @@ impl<T: Default + Clone> AtomicSlice<T> {
         self.currently_writing
             .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
             .unwrap();
+    }
+}
+
+impl<T> AtomicSlice<T> {
+    pub unsafe fn raw_data(&self) -> *const T {
+        let ptr_box = self.data.get();
+        (*ptr_box).as_ptr()
+    }
+
+    pub unsafe fn raw_status(&self) -> *const AtomicU64 {
+        &self.status
     }
 }
 

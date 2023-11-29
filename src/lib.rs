@@ -3,34 +3,39 @@ mod test;
 
 use std::{
     cell::UnsafeCell,
-    ops::{BitXor, Deref},
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    ops::Deref,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
-const CURRENT_SLICE_MASK: usize = 0x1;
-const CURRENT_SLICE_SHIFT: usize = 0;
-const NUM_SLICES: usize = 2; // bare minimum is 2. Consider making this larger and profiling
+// Status 64-bit layout
+// Byte 0 : active slice index
+// Byte 1 : unused padding
+// Byte 2 : slice 0 use count, low byte
+// Byte 3 : slice 0 use count, high byte
+// Byte 4 : unused padding
+// Byte 5 : slice 1 use count, low byte
+// Byte 6 : slice 1 use count, high byte
+// Byte 7 : unused padding
+// This provides 1 byte for active slice, and 2 bytes for each slice's
+// use count. More slices could be accommodated by trading off the
+// maximum number of simultaneous reads and the amount of padding.
 
-const SLICE_1_MASK: usize = 0xFFFF_00;
-const SLICE_1_SHIFT: usize = 8;
+const SLICE_1_INC: u64 = 0x00_0000_00_0001_00_00;
+const SLICE_2_INC: u64 = 0x00_0001_00_0000_00_00;
 
-const SLICE_2_MASK: usize = 0xFFFF_0000_00;
-const SLICE_2_SHIFT: usize = 24;
+const VALID_STATUS_MASK: u64 = 0x00_FFFF_00_FFFF_00_01;
 
-const SLICE_1_INC: usize = 1 << SLICE_1_SHIFT;
-const SLICE_2_INC: usize = 1 << SLICE_2_SHIFT;
+const INC_ALL_SLICES: u64 = SLICE_1_INC | SLICE_2_INC;
 
-const INC_ALL_SLICES: usize = SLICE_1_INC | SLICE_2_INC;
-
-fn slice_1_use_count(status: usize) -> usize {
-    (status & SLICE_1_MASK) >> SLICE_1_SHIFT
+fn slice_1_use_count(status: u64) -> u16 {
+    ((status >> 16) & 0xFFFF) as u16
 }
 
-fn slice_2_use_count(status: usize) -> usize {
-    (status & SLICE_2_MASK) >> SLICE_2_SHIFT
+fn slice_2_use_count(status: u64) -> u16 {
+    ((status >> 40) & 0xFFFF) as u16
 }
 
-fn slice_use_count(slice: usize, status: usize) -> usize {
+fn slice_use_count(slice: u8, status: u64) -> u16 {
     match slice {
         0 => slice_1_use_count(status),
         1 => slice_2_use_count(status),
@@ -38,54 +43,31 @@ fn slice_use_count(slice: usize, status: usize) -> usize {
     }
 }
 
-fn inc_slice(slice: usize) -> usize {
-    match slice {
-        0 => SLICE_1_INC,
-        1 => SLICE_2_INC,
-        _ => panic!("Invalid slice index"),
-    }
-}
-
-fn inc_all_slices_except(slice: usize) -> usize {
-    match slice {
-        0 => SLICE_2_INC,
-        1 => SLICE_1_INC,
-        _ => panic!("Invalid slice index"),
-    }
-}
-
-fn current_slice(status: usize) -> usize {
-    (status & CURRENT_SLICE_MASK) >> CURRENT_SLICE_SHIFT
-}
-
-fn valid_status(status: usize) -> bool {
-    let combined_mask = CURRENT_SLICE_MASK | SLICE_1_MASK | SLICE_2_MASK;
-    let leftover_bits = status & !combined_mask;
-    leftover_bits == 0
+fn valid_status(status: u64) -> bool {
+    (status & !VALID_STATUS_MASK) == 0
 }
 
 pub struct AtomicSlice<T> {
     data: UnsafeCell<Box<[T]>>,
     stride: usize,
-    status: AtomicUsize,
+    status: AtomicU64,
     currently_writing: AtomicBool,
 }
 
 pub struct AtomicSliceReadGuard<'a, T> {
     slice: &'a [T],
-    current_slice: usize,
-    status: &'a AtomicUsize,
+    current_slice: u8,
+    status: &'a AtomicU64,
 }
 
 impl<T: Default + Clone> AtomicSlice<T> {
     pub fn new(mut data: Vec<T>) -> AtomicSlice<T> {
         let stride = data.len();
-        let pool_size = NUM_SLICES;
-        data.resize(stride * pool_size, T::default());
+        data.resize(stride * 2, T::default());
         AtomicSlice {
             data: UnsafeCell::new(data.into_boxed_slice()),
             stride,
-            status: AtomicUsize::new(0),
+            status: AtomicU64::new(0),
             currently_writing: AtomicBool::new(false),
         }
     }
@@ -98,18 +80,21 @@ impl<T: Default + Clone> AtomicSlice<T> {
         debug_assert!(slice_1_use_count(status) < 0xFFFF);
         debug_assert!(slice_2_use_count(status) < 0xFFFF);
 
-        let current_slice = current_slice(status);
+        let current_slice = (status & 1) as u8;
 
         debug_assert!(slice_use_count(current_slice, self.status.load(Ordering::SeqCst)) > 0);
 
         // Now that the current slice is known, mark the others as no longer in use
-        let status = self
-            .status
-            .fetch_sub(inc_all_slices_except(current_slice), Ordering::SeqCst);
+        let inc_other_slice = if current_slice == 0 {
+            SLICE_2_INC
+        } else {
+            SLICE_1_INC
+        };
+        let status = self.status.fetch_sub(inc_other_slice, Ordering::SeqCst);
         debug_assert!(valid_status(status));
 
         let stride = self.stride;
-        let offset = current_slice * stride;
+        let offset = current_slice as usize * stride;
         let slice: &[T] = unsafe {
             let ptr_box = self.data.get();
             let ptr_data = (*ptr_box).as_ptr();
@@ -144,9 +129,8 @@ impl<T: Default + Clone> AtomicSlice<T> {
         // Load the current status
         let status = self.status.load(Ordering::SeqCst);
         debug_assert!(valid_status(status));
-        let i = current_slice(status);
-        debug_assert!(i < NUM_SLICES);
-        let next_i = (i + 1) % NUM_SLICES;
+        let i = (status & 1) as u8;
+        let next_i = i ^ 1;
 
         // Wait to ensure the next slice is not being used
         loop {
@@ -159,7 +143,7 @@ impl<T: Default + Clone> AtomicSlice<T> {
         }
 
         // Copy data to the next slice
-        let offset = next_i * stride;
+        let offset = (next_i as usize) * stride;
         let slice: &mut [T] = unsafe {
             let ptr_box = self.data.get();
             let ptr_data = (*ptr_box).as_mut_ptr();
@@ -170,8 +154,8 @@ impl<T: Default + Clone> AtomicSlice<T> {
             *v = data[i].clone();
         }
 
-        // Point all new readers to the next slice
-        let status = self.status.fetch_xor(i.bitxor(next_i), Ordering::SeqCst);
+        // Point all new readers to the other slice
+        let status = self.status.fetch_xor(1, Ordering::SeqCst);
         debug_assert!(valid_status(status));
 
         // Release exclusive access to the write portion
@@ -194,9 +178,12 @@ impl<'a, T> Deref for AtomicSliceReadGuard<'a, T> {
 
 impl<'a, T> Drop for AtomicSliceReadGuard<'a, T> {
     fn drop(&mut self) {
-        let status = self
-            .status
-            .fetch_sub(inc_slice(self.current_slice), Ordering::SeqCst);
+        let inc_slice = if self.current_slice == 0 {
+            SLICE_1_INC
+        } else {
+            SLICE_2_INC
+        };
+        let status = self.status.fetch_sub(inc_slice, Ordering::SeqCst);
         debug_assert!(valid_status(status));
         debug_assert!(slice_use_count(self.current_slice, status) > 0);
     }

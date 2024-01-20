@@ -161,3 +161,6 @@ impl TestType for ExampleStruct {}
 fn test_atomic_slice_example_struct() {
     test_grid_helper::<ExampleStruct>();
 }
+
+// TODO: add a test for multiple overlapping reads on the same thread.
+// should work just fine but better to test anyway.

@@ -1,3 +1,20 @@
+//! `AtomicSlice<T>` is a thread-safe wrapper around an array of arbitrary data which
+//! is just about as fast as possible to read while still being writable. Reading from
+//! an `AtomicSlice<T>` involves exactly three atomic operations (in release builds).
+//! Writing may involve some locking but is also possible from multiple threads.
+//!
+//! `AtomicSlice<T>` is thus heavily optimized for the case of frequent reads from
+//! multiple threads with occasional updates from other threads.
+//!
+//! The size of the internal array is arbitrary, but is fixed during construction.
+//!
+//! Internally, `AtomicSlice<T>` allocates a pool of twice as much memory as requested,
+//! which is partioned into two halves. During typical usage, on of these is being
+//! read from exclusively while the other is available for writing. After a write,
+//! the two partitions switch roles and new readers being accessing the freshly-written
+//! data immediately, while existing readers guard access to the stale data until they
+//! are dropped.
+
 #[cfg(test)]
 mod test;
 
@@ -20,6 +37,7 @@ use std::{
 // use count. More slices could be accommodated by trading off the
 // maximum number of simultaneous reads and the amount of padding.
 
+#[doc(hidden)]
 pub mod constants {
     pub const CURRENT_SLICE_MASK: u64 = 0x1;
 
@@ -51,6 +69,22 @@ fn valid_status(status: u64) -> bool {
     (status & !constants::VALID_STATUS_MASK) == 0
 }
 
+/// A slice of data that can be written and read from multiple threads,
+/// which is heavily optimized for multiple concurrent reads and occasional
+/// writes.
+///
+/// Reading from the slice involves only three atomic operations in total
+/// (when compiled in release mode). Writing the data involves some locking
+/// and is thus slower.
+///
+/// Internally, `AtomicSlice` allocates twice as much space as requested
+/// during construction, and readers and writers switch back and forth
+/// between accessing two partitions.
+///
+/// Currently, the data is stored indirectly in a boxed slice. In the future,
+/// it may be stored directly within the `AtomicSlice` which would then
+/// become a dynamically-sized type, giving more control to the user over the
+/// amount of indirection involved.
 pub struct AtomicSlice<T> {
     data: UnsafeCell<Box<[T]>>,
     stride: usize,
@@ -58,6 +92,11 @@ pub struct AtomicSlice<T> {
     currently_writing: AtomicBool,
 }
 
+/// A smart pointer type representing read-only access to the data in an
+/// `AtomicSlice`. When this type is dropped, it will release the read
+/// lock on the `AtomicSlice`. In situations of high load where write
+/// throughput is also important, this lock should ideally not be held
+/// for very long.
 pub struct AtomicSliceReadGuard<'a, T> {
     slice: &'a [T],
     current_slice: u8,
@@ -65,9 +104,12 @@ pub struct AtomicSliceReadGuard<'a, T> {
 }
 
 impl<T: Default + Clone> AtomicSlice<T> {
+    /// Create a new `AtomicSlice` from a vector of data. The `AtomicSlice`
+    /// will have the length of this vector for its entire lifetime.
     pub fn new(mut data: Vec<T>) -> AtomicSlice<T> {
         let stride = data.len();
         data.resize(stride * 2, T::default());
+        data.shrink_to_fit();
         AtomicSlice {
             data: UnsafeCell::new(data.into_boxed_slice()),
             stride,
@@ -76,10 +118,15 @@ impl<T: Default + Clone> AtomicSlice<T> {
         }
     }
 
+    /// Get the number of elements
     pub fn len(&self) -> usize {
         self.stride
     }
 
+    /// Acquire a read lock on the slice. Never waits or blocks, and performs
+    /// exactly two atomic operations (in release builds). The returned
+    /// lock guard will be released when it is dropped, performing an additional
+    /// single atomic operation.
     pub fn read<'a>(&'a self) -> AtomicSliceReadGuard<'a, T> {
         // Get current slice index while also marking all slices as in use.
         let status = self
@@ -121,6 +168,11 @@ impl<T: Default + Clone> AtomicSlice<T> {
         }
     }
 
+    /// Write a slice of new data. The given slice must have the same length as
+    /// the `AtomicSlice` itself, otherwise this method panics.
+    ///
+    /// This method may block if other threads are writing and if any readers
+    /// are holding lock guards for extended periods of time.
     pub fn write(&self, data: &[T]) {
         let stride = self.stride;
         if data.len() != stride {
@@ -175,6 +227,7 @@ impl<T: Default + Clone> AtomicSlice<T> {
     }
 }
 
+#[doc(hidden)]
 impl<T> AtomicSlice<T> {
     pub unsafe fn raw_data(&self) -> *const T {
         let ptr_box = self.data.get();

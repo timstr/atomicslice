@@ -2,6 +2,11 @@
 name = "atomicslice"
 version = "0.1.0"
 edition = "2021"
+authors = ["Tim Straubinger"]
+description = "A Rust library for thread-safe shared slices that are just about as fast as possible to read while also being writable."
+repository = "https://github.com/timstr/atomicslice"
+license = "MIT"
+keywords = ["atomic", "threading", "ipc"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

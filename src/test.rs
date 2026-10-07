@@ -44,8 +44,8 @@ fn single_test_helper<T: TestType>(config: TestConfig) {
                     for other_value in slice[1..].iter().cloned() {
                         assert_eq!(
                             first_value, other_value,
-                            "Reader {} encountered a slice with mis-matched values {} != {} on iteration {}: {:?}",
-                            i_reader, first_value, other_value, iter, slice
+                            "Reader {} encountered a slice with mis-matched values {} != {} on iteration {}",
+                            i_reader, first_value, other_value, iter
                         );
                     }
                 }

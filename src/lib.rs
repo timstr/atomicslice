@@ -86,6 +86,10 @@ fn valid_status(status: u64) -> bool {
 /// become a dynamically-sized type, giving more control to the user over the
 /// amount of indirection involved.
 pub struct AtomicSlice<T> {
+    // TODO: memory alignment might cause issues if the size isn't a big clean
+    // power of two, e.g. leading to cache contention at the partition boundary.
+    // It might be better align the upper half of the cache or to use two separate
+    // slices altogether
     data: UnsafeCell<Box<[T]>>,
     stride: usize,
     status: AtomicU64,
@@ -101,6 +105,12 @@ pub struct AtomicSliceReadGuard<'a, T> {
     slice: &'a [T],
     current_slice: u8,
     status: &'a AtomicU64,
+}
+
+impl<'a, T> AtomicSliceReadGuard<'a, T> {
+    pub fn current_slice(&self) -> u8 {
+        self.current_slice
+    }
 }
 
 impl<T: Default + Clone> AtomicSlice<T> {
@@ -150,22 +160,7 @@ impl<T: Default + Clone> AtomicSlice<T> {
         let status = self.status.fetch_sub(inc_other_slice, Ordering::SeqCst);
         debug_assert!(valid_status(status));
 
-        let stride = self.stride;
-        let offset = current_slice as usize * stride;
-        let slice: &[T] = unsafe {
-            let ptr_box = self.data.get();
-            let ptr_data = (*ptr_box).as_ptr();
-            let ptr_begin = ptr_data.add(offset);
-            std::slice::from_raw_parts(ptr_begin, stride)
-        };
-
-        debug_assert!(slice_use_count(current_slice, self.status.load(Ordering::SeqCst)) > 0);
-
-        AtomicSliceReadGuard {
-            slice,
-            current_slice: current_slice,
-            status: &self.status,
-        }
+        unsafe { self.make_guard_unchecked(current_slice) }
     }
 
     /// Write a slice of new data. The given slice must have the same length as
@@ -224,6 +219,35 @@ impl<T: Default + Clone> AtomicSlice<T> {
         self.currently_writing
             .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
             .unwrap();
+    }
+
+    /// Create a read guard for a desired slice **without locking**.
+    /// This is only safe when recreating a read guard that was previously
+    /// leaked using `mem::forget`.
+    pub unsafe fn make_guard_unchecked<'a>(
+        &'a self,
+        current_slice: u8,
+    ) -> AtomicSliceReadGuard<'a, T> {
+        let slice = self.read_unchecked(current_slice);
+
+        debug_assert!(slice_use_count(current_slice, self.status.load(Ordering::SeqCst)) > 0);
+
+        AtomicSliceReadGuard {
+            slice,
+            current_slice: current_slice,
+            status: &self.status,
+        }
+    }
+
+    /// Access a desired slice directly **without locking**.
+    /// This is only safe if a separate read lock is currently held.
+    pub unsafe fn read_unchecked(&self, current_slice: u8) -> &[T] {
+        let stride = self.stride;
+        let offset = current_slice as usize * stride;
+        let ptr_box = self.data.get();
+        let ptr_data = (*ptr_box).as_ptr();
+        let ptr_begin = ptr_data.add(offset);
+        std::slice::from_raw_parts(ptr_begin, stride)
     }
 }
 

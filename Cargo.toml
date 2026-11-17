@@ -1,6 +1,6 @@
 [package]
 name = "atomicslice"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["Tim Straubinger"]
 description = "A Rust library for thread-safe shared slices that are just about as fast as possible to read while also being writable."

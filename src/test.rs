@@ -1,6 +1,6 @@
 use std::sync::{
     atomic::{AtomicU8, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 use crate::AtomicSlice;
@@ -22,6 +22,13 @@ struct TestConfig {
     num_readers: usize,
     num_writers: usize,
     num_iterations: usize,
+}
+
+static TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+pub(crate) fn run_serially<F: FnOnce()>(f: F) {
+    let _lock = TEST_MUTEX.lock();
+    f();
 }
 
 fn single_test_helper<T: TestType>(config: TestConfig) {
@@ -104,32 +111,32 @@ impl TestType for f64 {}
 
 #[test]
 fn test_atomic_slice_u8() {
-    test_grid_helper::<u8>()
+    run_serially(test_grid_helper::<u8>);
 }
 
 #[test]
 fn test_atomic_slice_u16() {
-    test_grid_helper::<u16>()
+    run_serially(test_grid_helper::<u16>);
 }
 
 #[test]
 fn test_atomic_slice_u32() {
-    test_grid_helper::<u32>()
+    run_serially(test_grid_helper::<u32>);
 }
 
 #[test]
 fn test_atomic_slice_u64() {
-    test_grid_helper::<u64>()
+    run_serially(test_grid_helper::<u64>);
 }
 
 #[test]
 fn test_atomic_slice_f32() {
-    test_grid_helper::<f32>()
+    run_serially(test_grid_helper::<f32>);
 }
 
 #[test]
 fn test_atomic_slice_f64() {
-    test_grid_helper::<f64>()
+    run_serially(test_grid_helper::<f64>);
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Default)]
@@ -159,7 +166,7 @@ impl TestType for ExampleStruct {}
 
 #[test]
 fn test_atomic_slice_example_struct() {
-    test_grid_helper::<ExampleStruct>();
+    run_serially(test_grid_helper::<ExampleStruct>);
 }
 
 // TODO: add a test for multiple overlapping reads on the same thread.
